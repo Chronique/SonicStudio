@@ -1,0 +1,7 @@
+{
+  "name": "SonicStudio AI",
+  "description": "Agen AI canggih untuk komposisi musik dan pengeditan audio multi-track.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
