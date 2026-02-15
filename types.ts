@@ -5,26 +5,57 @@ export interface TrackMetadata {
   key: string;
   mood: string;
   description: string;
+  customPrompt?: string; 
+  timeSignature?: string;
+  duration?: string;
 }
 
-// Represents a single instrument track (e.g., User's Bass, AI's Drums)
+export interface Note {
+  pitch: number; 
+  startTime: number; 
+  duration: number; 
+  velocity: number; 
+}
+
+export interface FxConfig {
+  playbackRate?: number; // Speed/Pitch for audio files
+  reverb?: number; // 0-1 wet level
+  filterFreq?: number; // Lowpass cutoff Hz
+  distortion?: number; // 0-100 amount
+}
+
 export interface InstrumentLayer {
   id: string;
-  name: string; // e.g., "User Bass", "AI Drums"
+  name: string; 
   type: 'user' | 'ai';
-  instrument: string; // e.g., "bass", "drums", "synth"
-  description: string; // generated description of what this layer plays
+  instrument: string; 
+  description: string; 
   isActive: boolean;
-  volume: number; // 0-100
+  volume: number; 
+  notes?: Note[]; 
+  fx?: FxConfig; // New: Audio Effects settings
+}
+
+export interface Review {
+  rating: number; 
+  comment: string;
+  timestamp: number;
 }
 
 export interface Track {
   id: string;
   metadata: TrackMetadata;
   coverArtUrl?: string;
-  audioUrl?: string; // The "Full Mix" audio
-  layers: InstrumentLayer[]; // The separate stems
+  audioUrl?: string; 
+  layers: InstrumentLayer[]; 
   createdAt: number;
+  review?: Review; 
+  nft?: { 
+    minted: boolean;
+    contractAddress?: string;
+    tokenId?: string;
+    owner?: string;
+  };
 }
 
 export interface ChatMessage {

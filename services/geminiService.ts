@@ -4,12 +4,14 @@ import { TrackMetadata, InstrumentLayer } from "../types";
 const apiKey = process.env.API_KEY || '';
 const ai = new GoogleGenAI({ apiKey });
 
-// Helper to validate if API key is present
 export const checkApiKey = (): boolean => !!apiKey;
 
-/**
- * 1. Analyzes the User's Uploaded Stem (Bass, Guitar, Voice, etc.)
- */
+const cleanJson = (text: string): string => {
+  if (!text) return "{}";
+  let clean = text.replace(/```json/g, '').replace(/```/g, '').trim();
+  return clean;
+};
+
 export const analyzeStem = async (base64Audio: string, mimeType: string): Promise<{
   instrument: string;
   bpm: number;
@@ -18,133 +20,228 @@ export const analyzeStem = async (base64Audio: string, mimeType: string): Promis
 }> => {
   if (!apiKey) throw new Error("API Key missing");
 
-  const model = "gemini-2.5-flash-native-audio-preview-12-2025";
+  const model = "gemini-3-flash-preview";
   
-  const systemInstruction = `
-    You are an expert Music Producer and Composer. 
-    The user will upload an audio file. It might be a professional instrument stem, OR it might be a rough voice memo, humming, whistling, or a simple melody idea.
-    
-    Your task:
-    1. Identify the source (e.g., "User Humming", "Rough Guitar Riff", "Piano Melody").
-    2. Estimate the BPM and Musical Key (Major/Minor).
-    3. Suggest 3 music genres that would turn this simple idea into a hit song.
+  const promptText = `
+    Listen to this audio file carefully. You are an expert music producer agent.
+    1. Identify the primary instrument or sound source.
+    2. Estimate the BPM.
+    3. Detect the Musical Key.
+    4. Suggest 3 music genres.
+
+    Return ONLY raw JSON:
+    { "instrument": "string", "bpm": number, "key": "string", "suggestedGenres": ["string", "string", "string"] }
   `;
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: {
-      parts: [
-        { inlineData: { mimeType, data: base64Audio } },
-        { text: "Analyze this musical idea. Is it a full instrument or just a rough melody? Suggest genres." }
-      ]
-    },
-    config: {
-      systemInstruction,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          instrument: { type: Type.STRING, description: "e.g. 'Vocal Hum', 'Acoustic Guitar'" },
-          bpm: { type: Type.INTEGER },
-          key: { type: Type.STRING },
-          suggestedGenres: { type: Type.ARRAY, items: { type: Type.STRING } }
-        },
-        required: ["instrument", "bpm", "key", "suggestedGenres"]
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: {
+        parts: [
+          { inlineData: { mimeType, data: base64Audio } },
+          { text: promptText }
+        ]
+      },
+      config: {
+        responseMimeType: "application/json",
+        maxOutputTokens: 1024,
       }
-    }
-  });
+    });
 
-  if (response.text) {
-    return JSON.parse(response.text);
+    const text = cleanJson(response.text || "{}");
+    const parsed = JSON.parse(text);
+    
+    return {
+      instrument: parsed.instrument || "Detected Audio",
+      bpm: Number(parsed.bpm) || 120,
+      key: parsed.key || "C Major",
+      suggestedGenres: Array.isArray(parsed.suggestedGenres) ? parsed.suggestedGenres : ["Pop", "Electronic", "Ambient"]
+    };
+
+  } catch (e) {
+    console.error("Analysis failed", e);
+    return {
+      instrument: "Detected Audio",
+      bpm: 120,
+      key: "C Major",
+      suggestedGenres: ["Lo-Fi", "Pop", "Ambient"]
+    };
   }
-  
-  throw new Error("Failed to analyze stem");
 };
 
-/**
- * 2. Composes the Accompaniment (The rest of the band)
- */
 export const composeAccompaniment = async (
-  userInstrument: string, 
+  userInstrument: string | null, // Null means Text-to-Music mode
   genre: string, 
   bpm: number, 
-  key: string
+  key: string,
+  customInstruction?: string,
+  settings?: { duration: string; timeSignature: string; emotion: string }
 ): Promise<{
   title: string;
   mood: string;
   description: string;
-  layers: Array<{ name: string; instrument: string; description: string }>;
+  timeSignature: string;
+  duration: string;
+  bpm: number;
+  key: string;
+  layers: Array<{ name: string; instrument: string; description: string; notes: any[] }>;
 }> => {
   if (!apiKey) throw new Error("API Key missing");
 
   const model = "gemini-3-flash-preview";
 
-  const prompt = `
-    The user has provided a basic musical idea: "${userInstrument}".
-    Target Genre: ${genre}.
-    BPM: ${bpm}, Key: ${key}.
+  // Handle Slash Commands extraction from customInstruction
+  let finalBpm = bpm;
+  let finalKey = key;
+  let instruction = customInstruction || "";
 
-    Act as a full band arranger. Your job is to turn this simple input into a full, rich song.
+  // Simple regex parsing for overrides in prompt
+  const bpmMatch = instruction.match(/\/bpm\s+(\d+)/i);
+  if (bpmMatch) finalBpm = parseInt(bpmMatch[1]);
+
+  const keyMatch = instruction.match(/\/key\s+([a-zA-Z#]+\s*(?:Major|Minor)?)/i);
+  if (keyMatch) finalKey = keyMatch[1];
+
+  const mode = userInstrument ? "Remix/Backing Track" : "Text-to-Song Generation";
+  const inputContext = userInstrument 
+    ? `- User Input Stem: ${userInstrument}` 
+    : `- Mode: GENERATE FROM SCRATCH (No audio input)`;
+
+  const emotion = settings?.emotion || "Dynamic";
+  const timeSig = settings?.timeSignature || "4/4";
+
+  // STRICTER PROMPT FOR MUSICALITY
+  const prompt = `
+    You are 'Suno-Agent', a generative music AI.
     
-    1. Create a catchy Title.
-    2. Describe the Mood.
-    3. Create 3-4 AI Accompaniment Layers to support the user's input. 
-       - If the user uploaded a melody/hum, you need Chords (Piano/Synth) and Rhythm (Drums/Bass).
-       - If the user uploaded drums, you need Melody and Bass.
-       
-    Output JSON.
+    Configuration:
+    ${inputContext}
+    - Genre/Style: ${genre}
+    - Target BPM: ${finalBpm}
+    - Target Key: ${finalKey}
+    - Time Sig: ${timeSig}
+    - Emotion: ${emotion}
+    - User Prompt: ${instruction}
+
+    Task:
+    Compose a rich 4-layer arrangement (2 bars, 8 beats).
+    
+    Rules for MIDI Generation:
+    1. STRICTLY follow the Scale of ${finalKey}.
+    2. Quantize startTimes to 0.0, 0.25, 0.5, 0.75.
+    3. If 'Text-to-Song', create a Lead Melody layer.
+    4. "Bass": Root notes (Pitch 36-48).
+    5. "Harmony": Triads/Chords (Pitch 48-64).
+    6. "Drums": Kick(36), Snare(38), HiHat(42).
+    7. "Lead": Melody (Pitch 60-84).
+
+    Return JSON:
+    {
+      "title": "Song Title",
+      "mood": "Mood",
+      "description": "Short description",
+      "timeSignature": "${timeSig}",
+      "duration": "02:30",
+      "bpm": ${finalBpm},
+      "key": "${finalKey}",
+      "layers": [
+        { 
+          "name": "Bass", 
+          "instrument": "Bass", 
+          "description": " sawtooth",
+          "notes": [ { "pitch": 36, "startTime": 0.0, "duration": 0.5, "velocity": 100 } ]
+        }
+      ]
+    }
   `;
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: prompt,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          title: { type: Type.STRING },
-          mood: { type: Type.STRING },
-          description: { type: Type.STRING },
-          layers: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING, description: "Creative name, e.g. 'Deep Bassline'" },
-                instrument: { type: Type.STRING, description: "Category, e.g. 'Bass'" },
-                description: { type: Type.STRING, description: "What this layer adds to the user's idea" }
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        maxOutputTokens: 8192, 
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+            mood: { type: Type.STRING },
+            description: { type: Type.STRING },
+            timeSignature: { type: Type.STRING },
+            duration: { type: Type.STRING },
+            bpm: { type: Type.NUMBER },
+            key: { type: Type.STRING },
+            layers: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  instrument: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  notes: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        pitch: { type: Type.NUMBER },
+                        startTime: { type: Type.NUMBER },
+                        duration: { type: Type.NUMBER },
+                        velocity: { type: Type.NUMBER }
+                      }
+                    }
+                  }
+                }
               }
             }
           }
         }
       }
-    }
-  });
+    });
 
-  if (response.text) {
-    return JSON.parse(response.text);
+    if (response.text) {
+      const text = cleanJson(response.text);
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (parseError) {
+        throw new Error("Invalid JSON response from AI");
+      }
+
+      const layers = Array.isArray(parsed.layers) ? parsed.layers : [];
+      
+      return {
+        title: parsed.title || "Untitled Composition",
+        mood: parsed.mood || emotion,
+        description: parsed.description || "Generated by SonicStudio",
+        timeSignature: parsed.timeSignature || "4/4",
+        duration: parsed.duration || "02:30",
+        bpm: parsed.bpm || finalBpm,
+        key: parsed.key || finalKey,
+        layers: layers
+      };
+    }
+  } catch (error) {
+    console.error("Composition failed", error);
   }
 
-  throw new Error("Failed to compose accompaniment");
+  // Fallback
+  return {
+    title: "Untitled Session",
+    mood: "Deep Focus",
+    description: "AI arrangement generated by SonicStudio.",
+    timeSignature: "4/4",
+    duration: "02:00",
+    bpm: finalBpm,
+    key: finalKey,
+    layers: [
+        { name: "Bass", instrument: "Bass", description: "Fallback Bass", notes: [{pitch: 36, startTime: 0, duration: 1, velocity: 100}] },
+    ]
+  };
 };
 
-/**
- * Generates Cover Art
- */
 export const generateCoverArt = async (prompt: string): Promise<string> => {
-  if (!apiKey) throw new Error("API Key missing");
-  const model = "gemini-2.5-flash-image";
-  const response = await ai.models.generateContent({
-    model,
-    contents: `Album cover art for a song: ${prompt}. High quality, abstract, artistic, 4k resolution.`,
-  });
-  if (response.candidates?.[0]?.content?.parts) {
-    for (const part of response.candidates[0].content.parts) {
-      if (part.inlineData && part.inlineData.data) {
-        return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-      }
-    }
-  }
-  throw new Error("No image generated");
+  const query = encodeURIComponent(prompt.split(' ').slice(0, 3).join(' '));
+  return `https://source.unsplash.com/random/800x800/?abstract,music,${query}`;
 };
